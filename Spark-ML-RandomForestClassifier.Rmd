@@ -1,0 +1,588 @@
+---
+title: "PySpark-ML-RandomForestClassifier"
+author: "Luis Jesus TI"
+date: "2023-03-05"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## PySpark e Machine Learning
+
+Este código foi desenvolvido com objetivo de compartilhar conhecimentos com outras pessoas que desejam conhecer e trabalhar com PySpark e Machine Learning. A aplicação trata os dados de Acidente da Polícia Rodoviária Federal - PRF para treinamento e classificação dos acidentes como graves ou não graves, utilizando-se o algoritmo Random Forest Classifier.
+
+Trata-se de um código desenvolvido unicamente para utilização da tecnologia PySpark, portanto não houve uma análise aprofundada das classificações realizadas pelo Machine Learning.
+
+A parte do código onde são realizados o treinamento e teste do modelo de Classificação dos Acidentes é executada 5 vezes e, ao final, grava o tempo e a acurácia de cada uma das execuções.
+
+## De onde baixar os dados?
+
+Os dados utilizados utilizados neste trabalho foram os agrupados por ocorrência, disponíveis no link: https://www.gov.br/prf/pt-br/acesso-a-informacao/dados-abertos/dados-abertos-acidentes. 
+
+
+## Instalação de pacotes
+
+Esta seção é para instalação das bibliotecas que serão utilizadas para o perfeito funcionamento do programa.
+
+As linhas se encontram comentadas por não serem necessárias, uma vez que os pacotes já foram instalados. 
+
+
+```{python}
+#!pip install pyspark
+#!pip install pandas
+
+```
+
+## Imports dos pacotes
+
+Carga dos pacotes para execução do programa.
+
+```{python}
+####################################
+#  Imports
+
+# Pandas
+import pandas as pd
+
+# Utilidades
+from datetime import date, datetime, timedelta
+
+# Importar o PySpark
+import pyspark
+
+# pyspark machine learning
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import StringIndexer, VectorIndexer
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.ml.classification import RandomForestClassifier
+
+# pyspark SQL
+from pyspark.sql.functions import when, col, trim, countDistinct, udf
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, DoubleType, LongType
+
+# import SparkSession
+from pyspark.sql import SparkSession
+
+# retirar mensagens de warnings
+import warnings
+warnings.filterwarnings("ignore")
+
+```
+
+## Seção PySpark
+
+Instanciação de sessão PySpark com o máximo de Cores  (` .master('local[*]') `) da máquina local que utilizada para o processamento. No entanto, pode-se determinar a quantidade máxima de Cores a Sessão vai utilizar, informando o número no lugar do *, por exemplo: trocando pelo número 4, assim: `.master('local[4]') `. 
+
+```{python}
+####################################
+# Sessão Pyspark - SparkSession
+
+# Sessão
+spark = SparkSession.builder \
+    .master('local[*]') \
+    .appName("ClassifierCrash") \
+    .getOrCreate()
+
+```
+
+## Tratamento dos Dados
+
+Este exemplo utiliza dados dos de acidentes entre os anod de 2016 e 2022.
+
+Altere o valor da variável `qtd_anos_processamento` de 1 até 7 para processar os registros conforme a tabela a seguir:
+
+| qtd_anos_prodessamento  | Dados dos Acidentes do(s) ano(s)   |
+| ------- | -------- |
+| 1   | 2016    |
+| 2   | 2016; e 2017    |
+| 3   | 2016; 2017; e 2018    |
+| 4   | 2016; 2017; 2018;e 2019    |
+| 5   | 2016; 2017; 2018; 2019; e 2020    |
+| 6   | 2016; 2017; 2018; 2019; 2020; e 2021    |
+| 7   | 2016; 2017; 2018; 2019; 2020; 2021; e 2022    |
+
+
+```{python}
+####################################
+# Quantidade de anos de dados de acidentes a serem processados
+# 1 = 2016 | 2 = 2016 e 2017 | ... | 7 = 2016 até 2021
+
+qtd_anos_processamento = 7
+ 
+```
+
+
+### Schema
+
+O Data Frame Spark trabalha com Schema não flexível. O trecho de código abaixo, cria um Schema de Dados para carregar os dados dos arquivos com registros de acidentes. 
+
+Dentre os atributos do Schema, o campo \textbf{target} não tem origem nas informações dos acidentes, que será utilizado para guardar a informação de Acidente Grave (target = 1) e Não Graves (target = 0).
+
+```{python}
+####################################
+#  Definição do Schema - Campos dos CSVs que serão carregados
+# Observação: target não é campo do CSV
+
+acidente_schema = StructType([
+         StructField("id",IntegerType(),True),
+         StructField("data_inversa",StringType(),True),
+         StructField("dia_semana",StringType(),True),
+         StructField("horario",StringType(),True),
+         StructField("uf",StringType(),True),
+         StructField("br",IntegerType(),True),
+         StructField("km",StringType(),True),
+         StructField("municipio",StringType(),True),
+         StructField("causa_acidente",StringType(),True),
+         StructField("tipo_acidente",StringType(),True),
+         StructField("classificacao_acidente",StringType(),True),
+         StructField("fase_dia",StringType(),True),
+         StructField("sentido_via",StringType(),True),
+         StructField("condicao_metereologica",StringType(),True),
+         StructField("tipo_pista",StringType(),True),
+         StructField("tracado_via",StringType(),True),
+         StructField("uso_solo",StringType(),True),
+         StructField("pessoas",IntegerType(),True),
+         StructField("mortos",IntegerType(),True),
+         StructField("feridos_leves",IntegerType(),True),
+         StructField("feridos_graves",IntegerType(),True),
+         StructField("ilesos",IntegerType(),True),
+         StructField("ignorados",IntegerType(),True),
+         StructField("feridos",IntegerType(),True),
+         StructField("veiculos",IntegerType(),True),
+         StructField("target",IntegerType(),True)
+         ])
+
+```
+
+
+### Carga dos Dados
+
+A carga dos dados é realizada pela função definida no trecho de código abaixo que carrega dados de arquivos no formato CSV para o DataFrame do Spark.
+
+```{python}
+####################################
+#  Procedures e Funções
+
+def _carrega_spark_dataframe(_ano, df=None, mySchema=None, _separador=",", _enconding="latin1"):
+    print(f"Início da carga do arquivo de acidentes de {_ano}....", datetime.today())
+    
+    # Carregar o arquivo para o spark dataframe
+    dftmp = spark.read.format("csv").schema(mySchema).option("header","True").option("sep",_separador).option("encoding",_enconding).load(f"./dados/datatran{_ano}.csv")
+    # Verificar se foi passado dataframe
+    if df==None:
+        df = dftmp
+    else:
+        df = df.union(dftmp)
+    
+    # print após carga
+    print(f"Fim da carga do arquivo de acidentes de {_ano}....", datetime.today())
+    print("Total de registros carregados...",dftmp.count())
+    print("Total de registros acumulados...",df.count())
+    # delete de dataframe temporário
+    del dftmp
+    # retornar o dataframe concatenado
+    return df
+    
+```
+
+
+Neste trecho do código é realizada a carga do(s) arquivo(s) considerando a variável `qtd_anos_processamento`, conforme explicação anterior. 
+
+
+```{python}
+# Realização da carga do arquivos para dataframe
+# parâmetros: ano dos regitros, dataframe, separador, encoding
+
+if qtd_anos_processamento >= 1:
+    dft = _carrega_spark_dataframe("2016", None, acidente_schema, ";","latin1")
+if qtd_anos_processamento >= 2:
+    dft = _carrega_spark_dataframe("2017", dft, acidente_schema, ";","latin1")
+if qtd_anos_processamento >= 3:
+    dft = _carrega_spark_dataframe("2018", dft, acidente_schema, ";","latin1")
+if qtd_anos_processamento >= 4:
+    dft = _carrega_spark_dataframe("2019", dft, acidente_schema, ";","latin1")
+if qtd_anos_processamento >= 5:
+    dft = _carrega_spark_dataframe("2020", dft, acidente_schema, ";","latin1")
+if qtd_anos_processamento >= 6:
+    dft = _carrega_spark_dataframe("2021", dft, acidente_schema, ";","latin1")
+if qtd_anos_processamento >= 7:
+    dft = _carrega_spark_dataframe("2022", dft, acidente_schema, ";","latin1")
+
+```
+
+
+Este trecho copia o DataFrame para outro que será tratado daqui até o final do código.
+
+
+```{python}
+####################################
+# Copiar DataFrame
+
+sparkDF = dft
+
+```
+
+
+### TARGET
+
+Este código atualiza a coluna target, considerando o seguinte:
+
+Acidentes com Mortes `... when(sparkDF.mortos >= 1 ...` é acidente grave, então o target recebe o valor 1. Acidentes com Feridos Graves ` ...  ...`  é acidente grave, então o target também recebe o valor 1. Os demais casos, `... .otherwise(0) ...` o acidente não é grave, então o target recebe o valor 0.
+
+```{python}
+####################################
+#  Atualizar campo target
+
+# Marcar a coluna target - 1 = Acidente Grave | 2 = Acidente não grave
+sparkDF = sparkDF.withColumn("target", when(sparkDF.mortos >= 1, 1) \
+      .when(sparkDF.feridos_graves >=1, 1) \
+      .otherwise(0))
+
+
+```
+
+### Limpeza Registros com valores Nulos
+
+Realizou-se a limpeza de registros com campos nulos com a função `DataFrame.na.drop()`.
+
+O quantitativo resultante dessa operação fica listado após o código.
+
+
+```{python}
+####################################
+# Retirar os campos com colunas vazias - usar o na.drop()
+
+print("Retirada de registros que tem campos nulos ....")
+print("Total de registros no Dataframe antes da limpeza = ", sparkDF.count())
+sparkDF = sparkDF.na.drop()
+print("Total de registros no Dataframe após a limpeza = ", sparkDF.count())
+```
+
+### Acidentes com vítimas
+
+Para o estudo, somente interessam os registros de acidenes com vítimas. Assim, faz-se a limpeza dos registros de acidentes classificados (classificao_acidente) como 'Ignorados' e como 'Sem Vítimas'.
+
+O quantitativo resultante dessa operação fica listado após o código.
+
+```{python}
+####################################
+# Retirar registros que não farão parte da classificação
+# Deixar somente os registros de acidentes com vítimas
+
+# Filtrar
+
+print("Retirada de registros de acidentes sem vítimas e ignorados ....")
+print("Total de registros no Dataframe antes da limpeza = ", sparkDF.count())
+sparkDF = sparkDF.filter(col("classificacao_acidente") != 'Ignorados')
+print("Total de registros no Dataframe após a limpeza de 'Ignorados' = ", sparkDF.count())
+
+sparkDF = sparkDF.filter(col("classificacao_acidente") != 'Sem Vítimas')
+print("Total de registros no Dataframe após a limpeza de 'Sem Vítimas' = ", sparkDF.count())
+
+```
+
+### Colunas categóricas
+
+Este trecho separa as colunas categóricas.
+
+
+```{python}
+####################################
+# Colunas categóricas - Lista das colunas
+
+categoricalColumns = [ "dia_semana"
+                      ,"causa_acidente"
+                      ,"tipo_acidente"
+                      #,"classificacao_acidente"
+                      ,"fase_dia"
+                      ,"sentido_via"
+                      ,"condicao_metereologica"
+                      ,"tipo_pista"
+                      ,"tracado_via"
+                      ,"uso_solo"
+                      #,"pessoas"
+                      #,"veiculos"
+                     ]
+
+
+```
+
+
+
+Este trecho trata as colunas categóricas (encoded). 
+Para cada uma das colunas categóricas, outra é criada com sufixo "_encoded".
+
+
+```{python}
+####################################
+# Encode dos dados das Colunas categóricas
+
+# loop 
+for categoricalCol in categoricalColumns:
+    stringIndexer = StringIndexer(inputCol = categoricalCol, outputCol = categoricalCol+"_encoded").fit(sparkDF)
+    sparkDF = stringIndexer.transform(sparkDF)
+    sparkDF = sparkDF.withColumn(categoricalCol+"_encoded", sparkDF[categoricalCol+"_encoded"].cast('int'))
+    
+```
+
+Ao final do tratamento das colunas categóricas, o DataFrame apresenta a seguinte estrutura.
+
+Vejam as novas colunas com sufixo "_encoded".
+
+
+```{python}
+####################################
+# Print do Schema do dataframe
+
+sparkDF.printSchema()
+
+```
+
+O resultado da transformação do encoded no código abaixo. Vejam que as colunas "_encoded" tem valores numéricos.
+
+```{python}
+
+####################################
+# Colunas categóricas agora tem valores numéricos
+
+sparkDF.select("dia_semana_encoded"
+                      ,"causa_acidente_encoded"
+                      ,"tipo_acidente_encoded"
+                      ,"fase_dia_encoded"
+                      ,"sentido_via_encoded"
+                      ,"condicao_metereologica_encoded"
+                      ,"tipo_pista_encoded"
+                      ,"tracado_via_encoded"
+                      ,"uso_solo_encoded"
+                      ).show(5)
+
+```
+
+
+
+```{python}
+####################################
+# Criar DataFrame com as colunas para o modelo
+
+df2model =  sparkDF.select("dia_semana_encoded"
+                      ,"causa_acidente_encoded"
+                      ,"tipo_acidente_encoded"
+                      ,"fase_dia_encoded"
+                      ,"sentido_via_encoded"
+                      ,"condicao_metereologica_encoded"
+                      ,"tipo_pista_encoded"
+                      ,"tracado_via_encoded"
+                      ,"uso_solo_encoded"
+                      ,"pessoas"
+                      ,"veiculos"
+                      ,"target"
+                      )
+                      
+#encoded_df.show(5)
+
+```
+
+As features são os dados que serão analisados pelo classificador que vai classificar os acidentes como Graves ou Não Gravas. 
+
+Este trecho de código faz o trabamento das features para o modelo de Machine Learning.
+
+
+```{python}
+####################################
+# Preparar a separação das Features
+
+from pyspark.ml.feature import VectorAssembler
+
+featureAssembler = VectorAssembler(inputCols=["dia_semana_encoded"
+                      ,"causa_acidente_encoded"
+                      ,"tipo_acidente_encoded"
+                      ,"fase_dia_encoded"
+                      ,"sentido_via_encoded"
+                      ,"condicao_metereologica_encoded"
+                      ,"tipo_pista_encoded"
+                      ,"tracado_via_encoded"
+                      ,"uso_solo_encoded"
+                      ,"pessoas"
+                      ,"veiculos"
+                                             ],outputCol="features")
+
+```
+
+
+Este trecho realiza a transformação do DataFrame para o modelo de Machine Learning.
+
+
+```{python}
+####################################
+# Assembler 
+
+output = featureAssembler.transform(df2model)
+
+output.withColumnRenamed("target","labels").printSchema()
+
+
+```
+
+Este trecho de código mostra como as features e o target estão organizados no DataFrame.
+
+```{python}
+####################################
+# Mostrar o resultado do assembler 
+
+output.select("features","target").show(5)
+
+
+```
+Estre trecho de código seleciona o campo target e cria um dicionário com a descrição do campo "target".
+
+```{python}
+####################################
+# Preparação labels 
+
+udf_result = StructType([StructField('target',IntegerType())])
+
+target_dict = {'Não Grave': '0', 'Grave': '1'}
+
+```
+
+```{python}
+# função
+def assign_labels(target):
+    return Row(target_dict[target])
+
+```
+
+
+```{python}
+#assign_labels_udf = F.udf(assign_labels, udf_result)
+assign_labels_udf = udf(assign_labels, udf_result)
+
+output.withColumn('labels', assign_labels_udf('target')).drop('target').printSchema()
+
+```
+
+# Classificação dos acidentes pelo RandonForestClassifier 
+
+Este trecho do código submete os dados (output) ao Classificador (RandonForestClassifier) 5 vezes (`m=5`) e registra o tempo de processamento do processamento e a acurácia de cada uma das rodadas. Ao final, temos o registro do tempo e acurária de cada uma das rodadas.
+
+
+```{python}
+####################################
+# Separar em treino e teste
+
+# Quantidade de rodadas na variável m
+m = 5
+
+# inicialização de variáveis 
+resultado = []
+l_start_fit_spark = []
+l_stop_fit_spark = []
+l_start_predict_spark = []
+l_stop_predict_spark = []
+l_acuracia = []
+l_total_registros = []
+l_rodada = []
+
+# Quantidade de registros no processamento
+total_registros = sparkDF.count()
+
+# classificador com parâmetros básicos
+rf = RandomForestClassifier(featuresCol = 'features', labelCol = 'target')
+
+# loop repetindo o total de registros para avaliar o tempo médio de execução e acurária
+for i in range(m):
+    # split
+    train, test = output.randomSplit([0.7, 0.3])
+    
+    #train.show(5)
+    
+    #Training Model
+    start_fit_spark =  datetime.today()
+    print("Start : RandomForestClassifier ....",start_fit_spark)
+    rfModel = rf.fit(train)
+    stop_fit_spark =  datetime.today()
+    print("Stop  : RandomForestClassifier ....", datetime.today())
+
+    #Prediction
+    start_predict_spark =  datetime.today()
+    print("Start : RandomForestClassifier Transform ....",start_predict_spark)
+    predictions = rfModel.transform(test)
+    stop_predict_spark =  datetime.today() 
+    print("Stop  : RandomForestClassifier Transform ....",stop_predict_spark)
+    
+    #Avaliação da performance
+    evaluator = MulticlassClassificationEvaluator()
+    evaluator.setLabelCol("target")
+    evaluator.setPredictionCol("prediction")
+    acucacia = evaluator.evaluate(predictions)
+
+    # guardar resultado
+    l_start_fit_spark.append(start_fit_spark)
+    l_stop_fit_spark.append(stop_fit_spark)
+    l_start_predict_spark.append(start_predict_spark)
+    l_stop_predict_spark.append(stop_predict_spark)
+    l_acuracia.append(acucacia)
+    l_total_registros.append(total_registros)
+    l_rodada.append(qtd_anos_processamento)
+
+
+```
+
+# Análise do resultado
+
+Não é objetivo deste código, mas caso seja de interesse, o resultado da precição fica armazenada no DataFrame `predictions`. 
+
+O trecho de código abaixo transforma o Spark.DataFrame em Pandas DataFrame que considero mais simples de trabalhar. 
+
+Obs. O DataFrame trabalhado é da última execução do Loop.
+
+
+```{python}
+
+pd_predictions = predictions.toPandas()
+pd_predictions
+
+```
+
+### Tempo e acurácia do modelo
+
+O resultado das 5 rodadas são carregados no Pandas DataFrame df_resultado
+
+```{python}
+####################################
+# Cria dataframe com os resultados do processamento de loop
+
+df_resultado = pd.DataFrame(zip(l_rodada
+                              , l_total_registros
+                              , l_start_fit_spark
+                              , l_stop_fit_spark
+                              , l_start_predict_spark
+                              , l_stop_predict_spark
+                              , l_acuracia),
+                            columns = [ 'rodada'
+                                      , 'total_registros'
+                                      , 'start_fit'
+                                      , 'stop_fit'
+                                      , 'start_predict'
+                                      , 'stop_predict'
+                                      , 'acuracia'])
+
+df_resultado['tempo_fit'] = df_resultado['stop_fit'] - df_resultado['start_fit']
+
+df_resultado
+
+```
+
+## Final
+
+Chegamos ao final! Espero que este pequeno exemplo possa te ajudar de alguma forma no trabalho com Spark. 
+
+Desejo sucesso! 
+
+
+
+
